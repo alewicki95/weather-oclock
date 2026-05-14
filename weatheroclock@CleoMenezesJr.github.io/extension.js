@@ -7,6 +7,7 @@
  */
 
 import Clutter from "gi://Clutter";
+import Gio from "gi://Gio";
 import GLib from "gi://GLib";
 import GObject from "gi://GObject";
 import St from "gi://St";
@@ -15,6 +16,16 @@ import GWeather from "gi://GWeather";
 import * as Main from "resource:///org/gnome/shell/ui/main.js";
 import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 import { Spinner } from 'resource:///org/gnome/shell/ui/animation.js';
+
+const STATES = Object.freeze({
+  LOADING: 'LOADING',
+  SHOWING: 'SHOWING',
+  OFFLINE: 'OFFLINE',
+  UNAVAILABLE: 'UNAVAILABLE',
+  STALE: 'STALE',
+});
+
+const MAX_RETRIES = 5;
 
 export default class WeatherOClock extends Extension {
   constructor(metadata) {
@@ -122,6 +133,8 @@ const WeatherOClockPanelWeather = GObject.registerClass(
       this._hasData = false;
       this._notified = false;
       this._gaveUp = false;
+      this._state = null;
+      this._monitor = Gio.NetworkMonitor.get_default();
       this._currentDescription = null;
       this._currentTemp = null;
       this._currentIconName = null;
@@ -178,6 +191,7 @@ const WeatherOClockPanelWeather = GObject.registerClass(
       this._signals = null;
       this._weather = null;
       this._networkIcon = null;
+      this._monitor = null;
       this._clockDisplay = null;
       super.destroy();
     }
@@ -301,6 +315,93 @@ const WeatherOClockPanelWeather = GObject.registerClass(
         this._icon.show();
         this._label.hide();
       });
+    }
+
+    _setState(newState) {
+      if (this._state === newState) return;
+      this._state = newState;
+
+      switch (newState) {
+        case STATES.LOADING:
+          this._cancelDescriptionTimeout();
+          this._crossfade(() => {
+            this._spinner.play();
+            this._icon.hide();
+            this._label.hide();
+          });
+          break;
+
+        case STATES.SHOWING:
+          // UI transition into SHOWING is performed by _showWeather()
+          // which has the iconName + temp arguments. This case is a no-op:
+          // callers must invoke _showWeather() and then state becomes SHOWING.
+          break;
+
+        case STATES.OFFLINE:
+        case STATES.STALE:
+          this._cancelRetry();
+          this._hideWidget();
+          break;
+
+        case STATES.UNAVAILABLE:
+          this._cancelRetry();
+          this._cancelLongTermUpdateTimeout();
+          this._hideWidget();
+          if (!this._notified) {
+            this._notified = true;
+            Main.notify(
+              'Weather O\'Clock',
+              'GNOME Weather is required. Please install it for weather information to appear.',
+            );
+          }
+          break;
+      }
+    }
+
+    _onConnectivityChanged() {
+      if (!this._weather) return;
+      if (this._state === STATES.UNAVAILABLE) return;
+
+      const connectivity = this._monitor.connectivity;
+
+      if (connectivity === Gio.NetworkConnectivity.LOCAL) {
+        this._cancelRetry();
+        if (!this._weather.info.is_valid())
+          this._setState(STATES.OFFLINE);
+        return;
+      }
+
+      if (this._state === STATES.OFFLINE || this._state === STATES.STALE) {
+        this._retryCount = 0;
+        this._weather.update();
+        this._setState(STATES.LOADING);
+      }
+    }
+
+    _onAvailableChanged() {
+      if (!this._weather) return;
+
+      if (!this._weather.available) {
+        this._setState(STATES.UNAVAILABLE);
+        return;
+      }
+
+      if (this._state === STATES.UNAVAILABLE) {
+        this._notified = false;
+        this._state = STATES.OFFLINE;
+        this._onConnectivityChanged();
+      }
+    }
+
+    _evaluateInitialState() {
+      if (!this._weather) return;
+
+      if (this._monitor.connectivity === Gio.NetworkConnectivity.LOCAL) {
+        this._setState(STATES.OFFLINE);
+        return;
+      }
+      this._weather.update();
+      this._setState(STATES.LOADING);
     }
 
     _onWeatherInfoUpdate(weather) {
