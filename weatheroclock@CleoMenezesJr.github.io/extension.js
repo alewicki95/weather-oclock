@@ -164,17 +164,14 @@ const WeatherOClockPanelWeather = GObject.registerClass(
       this.add_child(this._label);
 
       this._pushSignal(this._weather, "changed", this._onWeatherInfoUpdate.bind(this));
+      this._pushSignal(this._weather, "notify::available", this._onAvailableChanged.bind(this));
+      this._pushSignal(this._monitor, "notify::connectivity", this._onConnectivityChanged.bind(this));
 
       if (this._networkIcon) {
         this._pushSignal(this._networkIcon, "notify::icon-name", this._onNetworkIconNotifyEvents.bind(this));
         this._pushSignal(this._networkIcon, "notify::visible", this._onNetworkIconNotifyEvents.bind(this));
-        if (this._networkIcon.visible)
-          this._weather.update();
-        else
-          this._showOffline();
-      } else {
-        this._weather.update();
       }
+      this._evaluateInitialState();
     }
 
     _pushSignal(obj, signalName, callback) {
@@ -286,13 +283,14 @@ const WeatherOClockPanelWeather = GObject.registerClass(
 
     _showWeather(iconName, temp, onShown = null) {
       const changed = iconName !== this._currentIconName || temp !== this._currentTemp;
+      const wasShowing = this._state === STATES.SHOWING;
       this._currentTemp = temp;
       this._currentIconName = iconName;
 
-      if (this._hasData && (!changed || this._showingDescription))
+      if (wasShowing && (!changed || this._showingDescription))
         return;
 
-      this._applyTransition(this._hasData ? this._label : this, () => {
+      this._applyTransition(wasShowing ? this._label : this, () => {
         this._spinner.stop();
         this._icon.icon_name = iconName;
         this._icon.show();
@@ -302,19 +300,12 @@ const WeatherOClockPanelWeather = GObject.registerClass(
         }
       }, onShown);
 
-      if (!this._hasData) {
-        this._hasData = true;
+      if (!wasShowing)
         this._startLongTermUpdateTimeout();
-      }
     }
 
     _showOffline() {
-      this._crossfade(() => {
-        this._spinner.stop();
-        this._icon.icon_name = "network-offline-symbolic";
-        this._icon.show();
-        this._label.hide();
-      });
+      this._setState(STATES.OFFLINE);
     }
 
     _setState(newState) {
@@ -406,12 +397,11 @@ const WeatherOClockPanelWeather = GObject.registerClass(
 
     _onWeatherInfoUpdate(weather) {
       if (!this._weather) return;
+      if (this._state === STATES.UNAVAILABLE) return;
 
       if (weather.loading) {
-        if (!this._hasData && !this._gaveUp) {
-          this._startSpinner();
-          this._scheduleRetry();
-        }
+        if (this._state !== STATES.SHOWING)
+          this._setState(STATES.LOADING);
         return;
       }
 
@@ -422,9 +412,9 @@ const WeatherOClockPanelWeather = GObject.registerClass(
       if (iconName && iconName !== "weather-missing-symbolic" && temp) {
         this._cancelRetry();
         this._retryCount = 0;
-        this._gaveUp = false;
+
         const [skyOk, skyValue] = weather.info.get_value_sky();
-        const [condOk, condPhenom, condQual] = weather.info.get_value_conditions();
+        const [condOk, condPhenom] = weather.info.get_value_conditions();
         let description = null;
 
         if (skyOk && skyValue !== GWeather.Sky.INVALID)
@@ -441,38 +431,27 @@ const WeatherOClockPanelWeather = GObject.registerClass(
             return GLib.SOURCE_REMOVE;
           });
         } : null;
+
         this._showWeather(iconName, temp, onShown);
-      } else if (!this._hasData) {
-        if (this._networkIcon && !this._networkIcon.visible) return;
-        if (this._retryCount < 5) {
-          this._scheduleRetry();
-        } else {
-          this._gaveUp = true;
-          this._hideWidget();
-          if (!weather.info.is_valid() && !this._notified) {
-            this._notified = true;
-            Main.notify(
-              'Weather O\'Clock',
-              'GNOME Weather is required. Please install it for weather information to appear.',
-            );
-          }
-        }
+        this._state = STATES.SHOWING;
+        return;
+      }
+
+      if (this._monitor.connectivity === Gio.NetworkConnectivity.LOCAL) {
+        this._setState(STATES.OFFLINE);
+      } else if (this._retryCount < MAX_RETRIES) {
+        this._scheduleRetry();
+      } else if (!weather.available) {
+        this._setState(STATES.UNAVAILABLE);
+      } else {
+        this._setState(STATES.STALE);
       }
     }
 
-    _onNetworkIconNotifyEvents(networkIcon) {
-      if (networkIcon.visible) {
-        this._retryCount = 0;
-        this._gaveUp = false;
-        this._weather.update();
-        if (this._hasData)
-          this._startLongTermUpdateTimeout();
-      } else {
-        this._cancelLongTermUpdateTimeout();
-        this._cancelRetry();
-        if (!this._hasData && !this._gaveUp)
-          this._showOffline();
-      }
+    _onNetworkIconNotifyEvents(_networkIcon) {
+      // Legacy handler kept temporarily; new logic lives in
+      // _onConnectivityChanged. This is a no-op and will be removed
+      // in the next commit.
     }
 
     _scheduleRetry() {
@@ -544,6 +523,9 @@ const WeatherOClockPanelWeather = GObject.registerClass(
         GLib.PRIORITY_LOW,
         600,
         () => {
+          if (!this._weather) return GLib.SOURCE_REMOVE;
+          if (this._monitor.connectivity === Gio.NetworkConnectivity.LOCAL)
+            return GLib.SOURCE_CONTINUE;
           this._weather.update();
           return GLib.SOURCE_CONTINUE;
         },
