@@ -40,11 +40,9 @@ export default class WeatherOClock extends Extension {
 
   enable() {
     const dateMenu = Main.panel.statusArea.dateMenu;
-    const network = Main.panel._network;
-    const networkIcon = network ? network._primaryIndicator : null;
     const weather = dateMenu._weatherItem._weatherClient;
     this._originalClockDisplay = dateMenu._clockDisplay;
-    this._panelWeather = new WeatherOClockPanelWeather(weather, networkIcon, this._originalClockDisplay);
+    this._panelWeather = new WeatherOClockPanelWeather(weather, this._originalClockDisplay);
 
     this._topBox = new St.BoxLayout({ style_class: "clock" });
 
@@ -116,23 +114,20 @@ const WeatherOClockPanelWeather = GObject.registerClass(
     GTypeName: "WeatherOClockPanelWeather",
   },
   class WeatherOClockPanelWeather extends St.BoxLayout {
-    _init(weather, networkIcon, clockDisplay) {
+    _init(weather, clockDisplay) {
       super._init({
         visible: false,
         y_align: Clutter.ActorAlign.CENTER,
       });
 
       this._weather = weather;
-      this._networkIcon = networkIcon;
       this._clockDisplay = clockDisplay;
       this._signals = [];
       this._weatherUpdateTimeout = null;
       this._retryTimeout = null;
       this._descriptionTimeout = null;
       this._retryCount = 0;
-      this._hasData = false;
       this._notified = false;
-      this._gaveUp = false;
       this._state = null;
       this._monitor = Gio.NetworkMonitor.get_default();
       this._currentDescription = null;
@@ -167,10 +162,6 @@ const WeatherOClockPanelWeather = GObject.registerClass(
       this._pushSignal(this._weather, "notify::available", this._onAvailableChanged.bind(this));
       this._pushSignal(this._monitor, "notify::connectivity", this._onConnectivityChanged.bind(this));
 
-      if (this._networkIcon) {
-        this._pushSignal(this._networkIcon, "notify::icon-name", this._onNetworkIconNotifyEvents.bind(this));
-        this._pushSignal(this._networkIcon, "notify::visible", this._onNetworkIconNotifyEvents.bind(this));
-      }
       this._evaluateInitialState();
     }
 
@@ -187,7 +178,6 @@ const WeatherOClockPanelWeather = GObject.registerClass(
       this._signals.forEach((s) => s.obj.disconnect(s.signalId));
       this._signals = null;
       this._weather = null;
-      this._networkIcon = null;
       this._monitor = null;
       this._clockDisplay = null;
       super.destroy();
@@ -302,10 +292,6 @@ const WeatherOClockPanelWeather = GObject.registerClass(
 
       if (!wasShowing)
         this._startLongTermUpdateTimeout();
-    }
-
-    _showOffline() {
-      this._setState(STATES.OFFLINE);
     }
 
     _setState(newState) {
@@ -446,12 +432,6 @@ const WeatherOClockPanelWeather = GObject.registerClass(
       } else {
         this._setState(STATES.STALE);
       }
-    }
-
-    _onNetworkIconNotifyEvents(_networkIcon) {
-      // Legacy handler kept temporarily; new logic lives in
-      // _onConnectivityChanged. This is a no-op and will be removed
-      // in the next commit.
     }
 
     _scheduleRetry() {
